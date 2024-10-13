@@ -1,0 +1,106 @@
+# Install required packages if they're not already installed
+if (!require("Hmisc")) {
+    install.packages("Hmisc")
+}
+if (!require("writexl")) {
+    install.packages("writexl")
+}
+if (!require("haven")) {
+    install.packages("haven")
+}
+if (!require("dplyr")) {
+    install.packages("dplyr")
+}
+library(Hmisc)
+library(dplyr)
+library(writexl)
+library(haven)
+
+# Define the path to your Desktop folder
+desktop_path <- "~/Desktop/Rick"
+
+# Load the data for years 2015 to 2023
+years <- 2015:2023
+file_paths <- paste0(desktop_path, "/epi_cpsorg_1979_2024/epi_cpsorg_", years, ".dta")
+
+# Load the data for each year
+data_list <- lapply(file_paths, haven::read_dta)
+df <- bind_rows(data_list)
+
+# Ensure wage column is cleaned up and outliers handled
+df <- df %>% 
+  mutate(wage = ifelse(wage > 0, wage, NA)) %>% 
+  filter(!is.na(wage))
+
+# Apply the EDUC_GROUP classification based on the working EDUC variable
+df <- df %>% 
+  mutate(EDUC_GROUP = case_when(
+    educ %in% c(1, 2, 3) ~ "Less than Bachelor's", 
+    educ %in% c(4, 5) ~ "Bachelor's and Higher"
+  ))
+
+# Convert female to character to ensure consistency
+df <- df %>% 
+  mutate(female = as.character(female))
+
+# Filter data to include necessary columns and group by year, sex, and EDUC_GROUP
+df_filtered <- df %>% 
+  select(year, female, EDUC_GROUP, wage, orgwgt) %>% 
+  filter(!is.na(EDUC_GROUP), !is.na(wage))
+
+# Group and calculate weighted averages and total employees for gendered data
+df_summary_gender <- df_filtered %>% 
+  group_by(year, female, EDUC_GROUP) %>% 
+  summarise(
+    avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), 
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000
+  )
+
+# Add the "All" category for EDUC_GROUP by summarizing without filtering on EDUC_GROUP, but split by education levels
+df_summary_all_educ <- df_filtered %>% 
+  group_by(year, EDUC_GROUP) %>% 
+  summarise(
+    avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), 
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000 
+  ) %>% 
+  mutate(female = "All")  # Mark these rows as "All" gender, broken down by education levels
+
+# Add the **Gender-only** breakdown without any education filter
+df_summary_gender_all_educ <- df_filtered %>%
+  group_by(year, female) %>%
+  summarise(
+    avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), 
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000
+  ) %>%
+  mutate(EDUC_GROUP = "All") # Mark this as "All" education levels.
+
+# Add the true "All" category (combining all education levels and all genders)
+df_summary_all <- df_filtered %>% 
+  group_by(year) %>% 
+  summarise(
+    avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), 
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000 
+  ) %>% 
+  mutate(female = "All", EDUC_GROUP = "All")  # True 'All' category across all educ levels and all genders
+
+# Combine gendered, All-educ-levels, true 'All', and **Gender-only** data ensuring data types match
+df_combined <- bind_rows(df_summary_gender, df_summary_all_educ, df_summary_gender_all_educ, df_summary_all)
+
+# Convert female to 'Sex' column for output clarity
+df_combined <- df_combined %>% 
+  mutate(Sex = case_when(
+    female == "1" ~ "Female",
+    female == "0" ~ "Male",
+    female == "All" ~ "All"
+  )) %>% 
+  select(year, Sex, EDUC_GROUP, avg_hourly_wage, total_employees)
+
+# Drop the 'female' column for neatness
+df_combined <- df_combined[ , names(df_combined) != "female"]
+
+# Save the result to an Excel file and CSV file
+write_xlsx(df_combined, path = paste0(desktop_path,"/cps_avg_wages_2015_2023_v11.xlsx"))
+write.csv(df_combined, file = paste0(desktop_path,"/cps_avg_wages_2015_2023_v11.csv"))
+
+# Debug - output unique values of educ
+print(unique(df$educ))
