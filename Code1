@@ -1,0 +1,113 @@
+# Install required packages if they're not already installed
+if (!require("Hmisc")) {
+  install.packages("Hmisc")
+}
+if (!require("writexl")) {
+  install.packages("writexl")
+}
+if (!require("haven")) {
+  install.packages("haven")
+}
+if (!require("dplyr")) {
+  install.packages("dplyr")
+}
+library(Hmisc)
+library(dplyr)
+library(writexl)
+library(haven)
+
+# Define the desktop path for Mac OS (you've used this before)
+desktop_path <- "~/Desktop/Rick"
+
+# Load and read the data for the years 2015 to 2023
+years <- 2015:2023
+file_paths <- paste0(desktop_path, "/epi_cpsorg_1979_2024/epi_cpsorg_", years, ".dta")
+
+# Load the data for each year
+data_list <- lapply(file_paths, haven::read_dta)
+df <- bind_rows(data_list)
+
+# Ensure wage column is cleaned up and outliers handled
+df <- df %>%
+  mutate(wage = ifelse(wage > 0, wage, NA)) %>%
+  filter(!is.na(wage))
+
+# Apply the EDUC_GROUP classification based on the working EDUC variable
+df <- df %>%
+  mutate(EDUC_GROUP = case_when(
+    educ %in% c(1, 2, 3) ~ "Less than Bachelor's", # Less than Bachelor's
+    educ %in% c(4, 5) ~ "Bachelor's and Higher" # Bachelor's degree and higher
+  ))
+
+# Create the weighted quantile function
+quantile_weighted <- function(x, probs, weights) {
+  Hmisc::wtd.quantile(x, probs = probs, weights = weights, na.rm = TRUE)
+}
+
+# Convert female to character to ensure consistency
+df <- df %>%
+  mutate(female = as.character(female))
+
+# Filter data to include necessary columns and group by year, sex, and EDUC_GROUP
+df_filtered <- df %>%
+  select(year, female, EDUC_GROUP, wage, orgwgt) %>%
+  filter(!is.na(EDUC_GROUP), !is.na(wage))
+
+# Group and calculate weighted percentiles and total employees for gendered data
+df_summary_gender <- df_filtered %>%
+  group_by(year, female, EDUC_GROUP) %>%
+  summarise(
+    p25_hourly_wage = quantile_weighted(wage, probs = 0.25, weights = orgwgt),
+    p50_hourly_wage = quantile_weighted(wage, probs = 0.50, weights = orgwgt),
+    p75_hourly_wage = quantile_weighted(wage, probs = 0.75, weights = orgwgt),
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+  )
+
+# Now, add the "All" category for EDUC_GROUP by summarizing without filtering on EDUC_GROUP
+df_summary_all_educ <- df_filtered %>%
+  group_by(year, female) %>%
+  summarise(
+    p25_hourly_wage = quantile_weighted(wage, probs = 0.25, weights = orgwgt),
+    p50_hourly_wage = quantile_weighted(wage, probs = 0.50, weights = orgwgt),
+    p75_hourly_wage = quantile_weighted(wage, probs = 0.75, weights = orgwgt),
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+  ) %>%
+  mutate(EDUC_GROUP = "All")
+
+# Prepare data for non-gendered (all) data
+df_summary_all <- df_filtered %>%
+  group_by(year) %>%
+  summarise(
+    p25_hourly_wage = quantile_weighted(wage, probs = 0.25, weights = orgwgt),
+    p50_hourly_wage = quantile_weighted(wage, probs = 0.50, weights = orgwgt),
+    p75_hourly_wage = quantile_weighted(wage, probs = 0.75, weights = orgwgt),
+    total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+  ) %>%
+  mutate(female = "All", EDUC_GROUP = "All")
+
+# Combine gendered and non-gendered data ensuring data types match
+df_summary_gender <- df_summary_gender %>%
+  mutate(female = as.character(female)) # Convert female variable to character again to ensure consistency
+df_combined <- bind_rows(df_summary_gender, df_summary_all_educ, df_summary_all)
+
+# Convert female to 'Sex' column for output clarity
+df_combined <- df_combined %>%
+  mutate(Sex = case_when(
+    female == "1" ~ "Female",
+    female == "0" ~ "Male",
+    female == "All" ~ "All"
+  )) %>%
+  select(year, Sex, EDUC_GROUP, p25_hourly_wage, p50_hourly_wage, p75_hourly_wage, total_employees)
+
+if (!dir.exists(desktop_path)){
+  dir.create(desktop_path) # create out directory if it doesn't exist
+}
+
+df_combined <- df_combined[ , names(df_combined) != "female"] # Drop female column
+
+# Save the result to an Excel file
+write_xlsx(df_combined, path = paste0(desktop_path,"/cps_hourly_wages_2015_2023_v10.xlsx")) # Save to the specified path
+write.csv(df_combined, file = paste0(desktop_path,"/cps_hourly_wages_2015_2023_v10.csv")) # Save as CSV file as well
+
+# Debug - output unique values of educ
+print(unique(df$educ))
