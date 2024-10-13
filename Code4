@@ -1,0 +1,115 @@
+# Install required packages if they're not already installed
+if (!require("Hmisc")) {
+    install.packages("Hmisc")
+}
+if (!require("writexl")) {
+    install.packages("writexl")
+}
+if (!require("haven")) {
+    install.packages("haven")
+}
+if (!require("dplyr")) {
+    install.packages("dplyr")
+}
+library(Hmisc)
+library(dplyr)
+library(writexl)
+library(haven)
+
+# Define the path to your Desktop folder
+desktop_path <- "~/Desktop/Rick"
+
+# Load the data for months 1 to 8 in 2024
+file_paths_2024 <- paste0(desktop_path, "/epi_cpsorg_1979_2024/epi_cpsorg_2024_", 1:8, ".dta")
+
+# Load the data for each month
+data_list_2024 <- lapply(file_paths_2024, haven::read_dta)
+df_2024 <- bind_rows(data_list_2024)
+
+# Add a 'month' column to indicate the corresponding month from 1 to 8
+df_2024 <- df_2024 %>%
+    mutate(month = rep(1:8, each = nrow(df_2024) / 8)) # Repeat month numbers based on the dataset size
+
+# Ensure wage column is cleaned up and outliers handled
+df_2024 <- df_2024 %>%
+    mutate(wage = ifelse(wage > 0, wage, NA)) %>%
+    filter(!is.na(wage))
+
+# Apply the EDUC_GROUP classification based on the working EDUC variable
+df_2024 <- df_2024 %>%
+    mutate(EDUC_GROUP = case_when(
+        educ %in% c(1, 2, 3) ~ "Less than Bachelor's", # Less than Bachelor's
+        educ %in% c(4, 5) ~ "Bachelor's and Higher"   # Bachelor's degree and higher
+    ))
+
+# Convert female to character to ensure consistency
+df_2024 <- df_2024 %>%
+    mutate(female = as.character(female))
+
+# Filter data to include necessary columns and group by month, sex, and EDUC_GROUP
+df_filtered_2024 <- df_2024 %>%
+    select(month, female, EDUC_GROUP, wage, orgwgt) %>%
+    filter(!is.na(EDUC_GROUP), !is.na(wage))
+
+# Group and calculate weighted averages and total employees for gendered data
+df_summary_gender_2024 <- df_filtered_2024 %>%
+    group_by(month, female, EDUC_GROUP) %>%
+    summarise(
+        avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), # Weighted average
+        total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+    )
+
+# Add the "All" category for EDUC_GROUP by summarizing without filtering on EDUC_GROUP
+df_summary_all_educ_2024 <- df_filtered_2024 %>%
+    group_by(month, female) %>%
+    summarise(
+        avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), # Weighted average
+        total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+    ) %>%
+    mutate(EDUC_GROUP = "All")
+
+# Prepare data for non-gendered (all people, all educations) 
+df_summary_all_people_educ_2024 <- df_filtered_2024 %>%
+    group_by(month, EDUC_GROUP) %>%
+    summarise(
+        avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), # Weighted average
+        total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+    ) %>%
+    mutate(female = "All")  # Assign female as "All" to represent all people
+
+# Prepare data for non-gendered (all people and all educations)
+df_summary_all_2024 <- df_filtered_2024 %>%
+    group_by(month) %>%
+    summarise(
+        avg_hourly_wage = wtd.mean(wage, weights = orgwgt, na.rm = TRUE), # Weighted average
+        total_employees = sum(orgwgt, na.rm = TRUE) / 1000 # Scale total employees
+    ) %>%
+    mutate(female = "All", EDUC_GROUP = "All")
+
+# Combine gendered and non-gendered data ensuring data types match
+df_summary_gender_2024 <- df_summary_gender_2024 %>%
+    mutate(female = as.character(female)) # Convert female variable to character again to ensure consistency
+
+df_combined_2024 <- bind_rows(df_summary_gender_2024, df_summary_all_educ_2024, df_summary_all_people_educ_2024, df_summary_all_2024)
+
+# Convert female to 'Sex' column for output clarity
+df_combined_2024 <- df_combined_2024 %>%
+    mutate(Sex = case_when(
+        female == "1" ~ "Female",
+        female == "0" ~ "Male",
+        female == "All" ~ "All"
+    )) %>%
+    select(month, Sex, EDUC_GROUP, avg_hourly_wage, total_employees)
+
+if (!dir.exists("out")){
+    dir.create("out") # create out directory if it doesn't exist
+}
+
+df_combined_2024 <- df_combined_2024[ , names(df_combined_2024) != "female"] # Drop female column
+
+# Save the result to an Excel file and CSV file
+write_xlsx(df_combined_2024, path = paste0(desktop_path,"/cps_avg_wages_2024_months_1to8_v10.xlsx"))
+write.csv(df_combined_2024, file = paste0(desktop_path,"/cps_avg_wages_2024_months_1to8_v10.csv"))
+
+# Debug - output unique values of educ
+print(unique(df_2024$educ))
